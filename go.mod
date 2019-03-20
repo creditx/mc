@@ -1,6 +1,7 @@
 module github.com/minio/mc
 
 require (
+	github.com/boltdb/bolt v1.3.1
 	github.com/cheggaaa/pb v0.0.0-20160713104425-73ae1d68fe0b
 	github.com/coreos/bbolt v1.3.2 // indirect
 	github.com/coreos/etcd v0.0.0-20180622175804-8f6348a97d48 // indirect
@@ -15,6 +16,7 @@ require (
 	github.com/gogo/protobuf v1.2.0 // indirect
 	github.com/golang/groupcache v0.0.0-20190129154638-5b532d6fd5ef // indirect
 	github.com/google/btree v0.0.0-20180813153112-4030bb1f1f0c // indirect
+	github.com/gorilla/mux v1.7.0
 	github.com/gorilla/websocket v1.4.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware v1.0.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0 // indirect

@@ -18,7 +18,10 @@ package cmd
 
 import (
 	"context"
+	gojson "encoding/json"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -26,8 +29,11 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
+	"github.com/boltdb/bolt"
 	"github.com/fatih/color"
+	"github.com/gorilla/mux"
 	"github.com/minio/cli"
 	json "github.com/minio/mc/pkg/colorjson"
 	"github.com/minio/mc/pkg/console"
@@ -147,6 +153,16 @@ EXAMPLES:
   11. Mirror server encrypted objects from Minio cloud storage to a bucket on Amazon S3 cloud storage
       $ {{.HelpName}} --encrypt-key "minio/photos=32byteslongsecretkeymustbegiven1,s3/archive=32byteslongsecretkeymustbegiven2" minio/photos/ s3/archive/
 `,
+}
+
+var db *bolt.DB
+
+type status struct {
+	SourceAlias string
+	TargetAlias string
+	TotalCount  int64
+	TotalSize   int64
+	Err         error
 }
 
 type mirrorJob struct {
@@ -292,6 +308,21 @@ func (mj *mirrorJob) monitorMirrorStatus() (errDuringMirror bool) {
 	defer mj.status.Finish()
 
 	for sURLs := range mj.statusCh {
+		simplified_status := status{
+			SourceAlias: sURLs.SourceAlias,
+			TargetAlias: sURLs.TargetAlias,
+			TotalCount:  sURLs.TotalCount,
+			TotalSize:   sURLs.TotalSize,
+			Err:         sURLs.Error.ToGoError(),
+		}
+
+		status_json, _ := gojson.Marshal(simplified_status)
+		db.Update(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("mirror_status"))
+			err := b.Put([]byte(time.Now().Format("2006-01-02T15:04:05")), status_json)
+			return err
+		})
+
 		if sURLs.Error != nil {
 			switch {
 			case sURLs.SourceContent != nil:
@@ -731,6 +762,19 @@ func mainMirror(ctx *cli.Context) error {
 	encKeyDB, err := getEncKeys(ctx)
 	fatalIf(err, "Unable to parse encryption keys.")
 
+	var db_err error
+	db, db_err = bolt.Open("/tmp/mirror_status.db", 0600, nil)
+	err = probe.NewError(db_err)
+	fatalIf(err, "failed to open bolt db.")
+
+	db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucket([]byte("mirror_status"))
+		if err != nil {
+			return fmt.Errorf("create bucket failed: %v", err)
+		}
+		return nil
+	})
+
 	// check 'mirror' cli arguments.
 	checkMirrorSyntax(ctx, encKeyDB)
 
@@ -742,9 +786,63 @@ func mainMirror(ctx *cli.Context) error {
 	srcURL := args[0]
 	tgtURL := args[1]
 
-	if errorDetected := runMirror(srcURL, tgtURL, ctx, encKeyDB); errorDetected {
-		return exitStatus(globalErrorExitStatus)
+	go runMirror(srcURL, tgtURL, ctx, encKeyDB)
+
+	//http server.
+	r := mux.NewRouter()
+	r.HandleFunc("/status", checkStatus).Methods("GET")
+	http.Handle("/", &server{r})
+	if err := http.ListenAndServe("0.0.0.0:9099", nil); err != nil {
+		log.Fatal(err)
 	}
 
+	// if errorDetected := runMirror(srcURL, tgtURL, ctx, encKeyDB); errorDetected {
+	// 	return exitStatus(globalErrorExitStatus)
+	// }
+
 	return nil
+}
+
+type server struct {
+	r *mux.Router
+}
+
+func (s *server) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	if origin := req.Header.Get("Origin"); origin != "" {
+		rw.Header().
+			Set("Access-Control-Allow-Origin",
+				origin)
+		rw.Header().
+			Set("Access-Control-Allow-Methods",
+				"POST, GET, OPTIONS, PUT, DELETE, PATCH")
+		rw.Header().
+			Set("Access-Control-Allow-Headers",
+				"Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+	}
+
+	// Stop here if its Preflighted OPTIONS request
+	if req.Method == "OPTIONS" {
+		return
+	}
+
+	// Lets Gorilla work
+	s.r.ServeHTTP(rw, req)
+}
+
+func checkStatus(w http.ResponseWriter, r *http.Request) {
+	var key, resp []byte
+	if err := db.View(func(tx *bolt.Tx) error {
+		c := tx.Bucket([]byte("mirror_status")).Cursor()
+		key, resp = c.Last()
+		log.Println("check key: ", string(key))
+		return nil
+	}); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(resp)
+	return
 }
